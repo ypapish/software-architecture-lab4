@@ -8,7 +8,10 @@ import (
 	"time"
 )
 
-const baseAddress = "http://balancer:8090"
+const (
+	baseAddress = "http://balancer:8090"
+	numRequests = 10
+)
 
 var client = http.Client{
 	Timeout: 3 * time.Second,
@@ -19,12 +22,33 @@ func TestBalancer(t *testing.T) {
 		t.Skip("Integration test is not enabled")
 	}
 
-	// TODO: Реалізуйте інтеграційний тест для балансувальникка.
-	resp, err := client.Get(fmt.Sprintf("%s/api/v1/some-data", baseAddress))
-	if err != nil {
-		t.Error(err)
+	serverHits := make(map[string]int)
+
+	for i := 0; i < numRequests; i++ {
+		resp, err := client.Get(fmt.Sprintf("%s/api/v1/some-data", baseAddress))
+		if err != nil {
+			t.Errorf("Request failed: %v", err)
+			continue
+		}
+		defer resp.Body.Close()
+
+		server := resp.Header.Get("lb-from")
+		if server == "" {
+			t.Error("Response missing 'lb-from' header")
+			continue
+		}
+
+		t.Logf("Request %d: handled by server %s", i+1, server)
+		serverHits[server]++
 	}
-	t.Logf("response from [%s]", resp.Header.Get("lb-from"))
+
+	if len(serverHits) < 2 {
+		t.Errorf("Requests were not distributed to multiple servers. Got hits: %v", serverHits)
+	}
+
+	for server, hits := range serverHits {
+		t.Logf("Server %s handled %d requests", server, hits)
+	}
 }
 
 func BenchmarkBalancer(b *testing.B) {
