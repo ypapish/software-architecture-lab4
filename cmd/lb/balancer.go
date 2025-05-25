@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/roman-mazur/architecture-practice-4-template/httptools"
@@ -21,13 +22,21 @@ var (
 	traceEnabled = flag.Bool("trace", false, "whether to include tracing information into responses")
 )
 
+type Server struct {
+	URL         string
+	ActiveConns int
+	Mutex       sync.Mutex
+	IsHealthy   bool
+}
+
 var (
 	timeout     = time.Duration(*timeoutSec) * time.Second
-	serversPool = []string{
-		"server1:8080",
-		"server2:8080",
-		"server3:8080",
+	serversPool = []*Server{
+		{URL: "server1:8080"},
+		{URL: "server2:8080"},
+		{URL: "server3:8080"},
 	}
+	poolMutex sync.RWMutex
 )
 
 func scheme() string {
@@ -37,22 +46,27 @@ func scheme() string {
 	return "http"
 }
 
-func health(dst string) bool {
-	ctx, _ := context.WithTimeout(context.Background(), timeout)
+func health(server *Server) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
 	req, _ := http.NewRequestWithContext(ctx, "GET",
-		fmt.Sprintf("%s://%s/health", scheme(), dst), nil)
+		fmt.Sprintf("%s://%s/health", scheme(), server.URL), nil)
+
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return false
+	server.Mutex.Lock()
+	defer server.Mutex.Unlock()
+	if err != nil || resp.StatusCode != http.StatusOK {
+		server.IsHealthy = false
+		return
 	}
-	if resp.StatusCode != http.StatusOK {
-		return false
-	}
-	return true
+	server.IsHealthy = true
 }
 
 func forward(dst string, rw http.ResponseWriter, r *http.Request) error {
-	ctx, _ := context.WithTimeout(r.Context(), timeout)
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+
 	fwdRequest := r.Clone(ctx)
 	fwdRequest.RequestURI = ""
 	fwdRequest.URL.Host = dst
@@ -60,46 +74,81 @@ func forward(dst string, rw http.ResponseWriter, r *http.Request) error {
 	fwdRequest.Host = dst
 
 	resp, err := http.DefaultClient.Do(fwdRequest)
-	if err == nil {
-		for k, values := range resp.Header {
-			for _, value := range values {
-				rw.Header().Add(k, value)
-			}
-		}
-		if *traceEnabled {
-			rw.Header().Set("lb-from", dst)
-		}
-		log.Println("fwd", resp.StatusCode, resp.Request.URL)
-		rw.WriteHeader(resp.StatusCode)
-		defer resp.Body.Close()
-		_, err := io.Copy(rw, resp.Body)
-		if err != nil {
-			log.Printf("Failed to write response: %s", err)
-		}
-		return nil
-	} else {
+	if err != nil {
 		log.Printf("Failed to get response from %s: %s", dst, err)
 		rw.WriteHeader(http.StatusServiceUnavailable)
 		return err
 	}
+	defer resp.Body.Close()
+
+	for k, values := range resp.Header {
+		for _, value := range values {
+			rw.Header().Add(k, value)
+		}
+	}
+	if *traceEnabled {
+		rw.Header().Set("lb-from", dst)
+	}
+	log.Println("fwd", resp.StatusCode, resp.Request.URL)
+	rw.WriteHeader(resp.StatusCode)
+	_, err = io.Copy(rw, resp.Body)
+	if err != nil {
+		log.Printf("Failed to write response: %s", err)
+	}
+	return nil
+}
+
+func findLeastBusyServer() *Server {
+	poolMutex.RLock()
+	defer poolMutex.RUnlock()
+
+	var leastBusyServer *Server
+
+	for _, server := range serversPool {
+		server.Mutex.Lock()
+		if server.IsHealthy {
+			if leastBusyServer == nil {
+				leastBusyServer = server
+			}
+			if server.ActiveConns < leastBusyServer.ActiveConns {
+				leastBusyServer = server
+			}
+		}
+		server.Mutex.Unlock()
+	}
+	return leastBusyServer
 }
 
 func main() {
 	flag.Parse()
 
-	// TODO: Використовуйте дані про стан сервера, щоб підтримувати список тих серверів, яким можна відправляти запит.
-	for _, server := range serversPool {
-		server := server
-		go func() {
-			for range time.Tick(10 * time.Second) {
-				log.Println(server, "healthy:", health(server))
+	go func() {
+		for {
+			for _, server := range serversPool {
+				health(server)
 			}
-		}()
-	}
+			time.Sleep(10 * time.Second)
+		}
+	}()
 
 	frontend := httptools.CreateServer(*port, http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-		// TODO: Реалізуйте свій алгоритм балансувальника.
-		forward(serversPool[0], rw, r)
+		server := findLeastBusyServer()
+		if server == nil {
+			rw.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+
+		server.Mutex.Lock()
+		server.ActiveConns++
+		server.Mutex.Unlock()
+
+		defer func() {
+			server.Mutex.Lock()
+			server.ActiveConns--
+			server.Mutex.Unlock()
+		}()
+
+		forward(server.URL, rw, r)
 	}))
 
 	log.Println("Starting load balancer...")
