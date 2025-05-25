@@ -96,3 +96,63 @@ func TestFindLeastBusyServer(t *testing.T) {
 		t.Errorf("Expected s2, got %s", server.URL)
 	}
 }
+
+func TestFindLeastBusyServer_AllHealthy(t *testing.T) {
+	serversPool = []*Server{
+		{URL: "s1", ActiveConns: 3, IsHealthy: true},
+		{URL: "s2", ActiveConns: 1, IsHealthy: true},
+		{URL: "s3", ActiveConns: 5, IsHealthy: true},
+	}
+
+	server := findLeastBusyServer()
+	if server == nil || server.URL != "s2" {
+		t.Errorf("Expected s2 as least busy healthy server, got %v", server)
+	}
+}
+
+func TestFindLeastBusyServer_OnlyOneHealthy(t *testing.T) {
+	serversPool = []*Server{
+		{URL: "s1", ActiveConns: 3, IsHealthy: false},
+		{URL: "s2", ActiveConns: 1, IsHealthy: true},
+		{URL: "s3", ActiveConns: 0, IsHealthy: false},
+	}
+
+	server := findLeastBusyServer()
+	if server == nil || server.URL != "s2" {
+		t.Errorf("Expected s2 as only healthy server, got %v", server)
+	}
+}
+
+func TestFindLeastBusyServer_AllUnhealthy(t *testing.T) {
+	serversPool = []*Server{
+		{URL: "s1", ActiveConns: 1, IsHealthy: false},
+		{URL: "s2", ActiveConns: 2, IsHealthy: false},
+	}
+
+	server := findLeastBusyServer()
+	if server != nil {
+		t.Errorf("Expected nil, got %v", server)
+	}
+}
+
+func TestFindLeastBusyServer_SameLoadMultipleHealthy(t *testing.T) {
+	serversPool = []*Server{
+		{URL: "s1", ActiveConns: 2, IsHealthy: true},
+		{URL: "s2", ActiveConns: 2, IsHealthy: true},
+		{URL: "s3", ActiveConns: 5, IsHealthy: true},
+	}
+
+	server := findLeastBusyServer()
+	if server == nil || server.URL != "s1" {
+		t.Errorf("Expected s1 as first among least loaded, got %v", server)
+	}
+}
+
+func TestFindLeastBusyServer_EmptyPool(t *testing.T) {
+	serversPool = []*Server{}
+
+	server := findLeastBusyServer()
+	if server != nil {
+		t.Errorf("Expected nil from empty server pool, got %v", server)
+	}
+}
