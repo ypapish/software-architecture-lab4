@@ -52,5 +52,17 @@ func TestBalancer(t *testing.T) {
 }
 
 func BenchmarkBalancer(b *testing.B) {
-	// TODO: Реалізуйте інтеграційний бенчмарк для балансувальникка.
+	if _, exists := os.LookupEnv("INTEGRATION_TEST"); !exists {
+		b.Skip("Integration test is not enabled")
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		resp, err := client.Get(fmt.Sprintf("%s/api/v1/some-data", baseAddress))
+		if err != nil {
+			b.Error(err)
+			continue
+		}
+		resp.Body.Close()
+	}
 }
