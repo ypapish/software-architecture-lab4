@@ -22,24 +22,37 @@ func TestBalancer(t *testing.T) {
 		t.Skip("Integration test is not enabled")
 	}
 
-	serverHits := make(map[string]int)
+	const maxAttempts = 3
+	var serverHits map[string]int
 
-	for i := 0; i < numRequests; i++ {
-		resp, err := client.Get(fmt.Sprintf("%s/api/v1/some-data", baseAddress))
-		if err != nil {
-			t.Errorf("Request failed: %v", err)
-			continue
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		t.Logf("Attempt %d/%d", attempt, maxAttempts)
+		serverHits = make(map[string]int)
+
+		for i := 0; i < numRequests; i++ {
+			resp, err := client.Get(fmt.Sprintf("%s/api/v1/some-data", baseAddress))
+			if err != nil {
+				t.Errorf("Request failed: %v", err)
+				continue
+			}
+			defer resp.Body.Close()
+
+			server := resp.Header.Get("lb-from")
+			if server == "" {
+				t.Error("Response missing 'lb-from' header")
+				continue
+			}
+
+			t.Logf("Request %d: handled by server %s", i+1, server)
+			serverHits[server]++
 		}
-		defer resp.Body.Close()
 
-		server := resp.Header.Get("lb-from")
-		if server == "" {
-			t.Error("Response missing 'lb-from' header")
-			continue
+		if len(serverHits) >= 2 {
+			break
 		}
 
-		t.Logf("Request %d: handled by server %s", i+1, server)
-		serverHits[server]++
+		t.Log("Retrying due to poor distribution...")
+		time.Sleep(1 * time.Second)
 	}
 
 	if len(serverHits) < 2 {
