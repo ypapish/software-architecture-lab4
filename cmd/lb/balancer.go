@@ -107,10 +107,7 @@ func findLeastBusyServer() *Server {
 	for _, server := range serversPool {
 		server.Mutex.Lock()
 		if server.IsHealthy {
-			if leastBusyServer == nil {
-				leastBusyServer = server
-			}
-			if server.ActiveConns < leastBusyServer.ActiveConns {
+			if leastBusyServer == nil || server.ActiveConns < leastBusyServer.ActiveConns {
 				leastBusyServer = server
 			}
 		}
