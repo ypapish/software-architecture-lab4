@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"sync"
 	"time"
@@ -32,11 +33,13 @@ type Server struct {
 var (
 	timeout     = time.Duration(*timeoutSec) * time.Second
 	serversPool = []*Server{
-		{URL: "server1:8080"},
-		{URL: "server2:8080"},
-		{URL: "server3:8080"},
+		{URL: "server1:8080", IsHealthy: true},
+		{URL: "server2:8080", IsHealthy: true},
+		{URL: "server3:8080", IsHealthy: true},
 	}
-	poolMutex sync.RWMutex
+	poolMutex       sync.RWMutex
+	roundRobinIndex int
+	roundRobinMutex sync.Mutex
 )
 
 func scheme() string {
@@ -54,13 +57,17 @@ func health(server *Server) {
 		fmt.Sprintf("%s://%s/health", scheme(), server.URL), nil)
 
 	resp, err := http.DefaultClient.Do(req)
+
 	server.Mutex.Lock()
 	defer server.Mutex.Unlock()
-	if err != nil || resp.StatusCode != http.StatusOK {
+
+	if err != nil {
 		server.IsHealthy = false
 		return
 	}
-	server.IsHealthy = true
+	defer resp.Body.Close()
+
+	server.IsHealthy = (resp.StatusCode == http.StatusOK)
 }
 
 func forward(dst string, rw http.ResponseWriter, r *http.Request) error {
@@ -103,20 +110,65 @@ func findLeastBusyServer() *Server {
 	defer poolMutex.RUnlock()
 
 	var leastBusyServer *Server
+	minActiveConns := math.MaxInt32
+
+	for _, server := range serversPool {
+		server.Mutex.Lock()
+		if server.IsHealthy && server.ActiveConns < minActiveConns {
+			leastBusyServer = server
+			minActiveConns = server.ActiveConns
+		}
+		server.Mutex.Unlock()
+	}
+
+	if leastBusyServer != nil {
+		leastBusyServer.Mutex.Lock()
+		if leastBusyServer.IsHealthy {
+			leastBusyServer.ActiveConns++
+			leastBusyServer.Mutex.Unlock()
+			return leastBusyServer
+		}
+		leastBusyServer.Mutex.Unlock()
+	}
+
+	return nil
+}
+
+func findServerRoundRobin() *Server {
+	poolMutex.RLock()
+	healthyServers := make([]*Server, 0, len(serversPool))
 
 	for _, server := range serversPool {
 		server.Mutex.Lock()
 		if server.IsHealthy {
-			if leastBusyServer == nil {
-				leastBusyServer = server
-			}
-			if server.ActiveConns < leastBusyServer.ActiveConns {
-				leastBusyServer = server
-			}
+			healthyServers = append(healthyServers, server)
 		}
 		server.Mutex.Unlock()
 	}
-	return leastBusyServer
+	poolMutex.RUnlock()
+
+	if len(healthyServers) == 0 {
+		return nil
+	}
+
+	roundRobinMutex.Lock()
+	server := healthyServers[roundRobinIndex%len(healthyServers)]
+	roundRobinIndex++
+	roundRobinMutex.Unlock()
+
+	server.Mutex.Lock()
+	server.ActiveConns++
+	server.Mutex.Unlock()
+
+	return server
+}
+
+func releaseServer(server *Server) {
+	server.Mutex.Lock()
+	if server.ActiveConns > 0 {
+		server.ActiveConns--
+	}
+	server.Mutex.Unlock()
 }
 
 func main() {
@@ -142,11 +194,7 @@ func main() {
 		server.ActiveConns++
 		server.Mutex.Unlock()
 
-		defer func() {
-			server.Mutex.Lock()
-			server.ActiveConns--
-			server.Mutex.Unlock()
-		}()
+		defer releaseServer(server)
 
 		forward(server.URL, rw, r)
 	}))
